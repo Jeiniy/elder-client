@@ -14,10 +14,13 @@ async function onLogin () {
   err.value = ''; loading.value = true
   try {
     const { data } = await login({ email: email.value.trim(), password: password.value })
+    if (!data.success) {
+      err.value = data.msg || '帳號或密碼錯誤'
+      return
+    }
     localStorage.setItem('access_token', data.access_token)
     localStorage.setItem('userName', data.user?.name || '')
-    // 登入成功後轉到長者端的首頁
-    router.push('/image')
+    router.push('/home')
   } catch (e) {
     err.value = e?.response?.data?.detail || '帳號或密碼錯誤'
   } finally {

@@ -1,26 +1,25 @@
 <script setup>
-import { ref } from 'vue'
+import { login } from '@/api'
 import { useRouter } from 'vue-router'
-import { login, whoAmI } from '@/api'
+import { ref } from 'vue'
 
 const router = useRouter()
-const username = ref('')
+const email = ref('')
 const password = ref('')
-const loading = ref(false)
 const err = ref('')
+const loading = ref(false)
 
-async function submit() {
+async function onLogin () {
   if (loading.value) return
-  err.value = ''
-  loading.value = true
+  err.value = ''; loading.value = true
   try {
-    await login({ username: username.value.trim(), password: password.value })
-    await whoAmI() // 若後端沒有 /auth/me 可移除
-    router.push('/dashboard') // 先決定登入後要去的頁面
+    const { data } = await login({ email: email.value.trim(), password: password.value })
+    localStorage.setItem('access_token', data.access_token)
+    localStorage.setItem('userName', data.user?.name || '')
+    // 登入成功後轉到長者端的首頁
+    router.push('/image')
   } catch (e) {
-    err.value =
-      e?.response?.data?.error?.message ||
-      (e?.response?.status === 401 ? '帳號或密碼錯誤' : '登入失敗，請稍後再試')
+    err.value = e?.response?.data?.detail || '帳號或密碼錯誤'
   } finally {
     loading.value = false
   }
@@ -30,33 +29,35 @@ async function submit() {
 
 <template>
   <div class="page">
-    <main class="card" @keyup.enter="submit">
+    <main class="card">
       <h1 class="title">登入</h1>
 
-      <label class="label" for="user">帳號</label>
-      <input
-        id="user"
-        v-model="username"
-        class="input"
-        type="text"
-        inputmode="email"
-        autocomplete="username"
-        placeholder="email 或手機"
-      />
+      <!-- 用 form 搭配 @submit.prevent，自動支援 Enter -->
+      <form @submit.prevent="onLogin" style="display:grid;gap:14px">
+        <label class="label" for="email">帳號（Email）</label>
+        <input
+          id="email"
+          v-model="email"
+          class="input"
+          type="email"
+          autocomplete="username"
+          placeholder="請輸入 Email"
+        />
 
-      <label class="label" for="pass">密碼</label>
-      <input
-        id="pass"
-        v-model="password"
-        class="input"
-        type="password"
-        autocomplete="current-password"
-        placeholder="請輸入密碼"
-      />
+        <label class="label" for="pass">密碼</label>
+        <input
+          id="pass"
+          v-model="password"
+          class="input"
+          type="password"
+          autocomplete="current-password"
+          placeholder="請輸入密碼"
+        />
 
-      <button class="btn" :disabled="loading" @click="submit">
-        {{ loading ? '登入中…' : '登入' }}
-      </button>
+        <button class="btn" type="submit" :disabled="loading">
+          {{ loading ? '登入中…' : '登入' }}
+        </button>
+      </form>
 
       <p v-if="err" class="err">{{ err }}</p>
     </main>

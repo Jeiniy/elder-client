@@ -1,200 +1,220 @@
 <!-- src/views/ChatView.vue -->
 <template>
-  <!-- 置頂導覽列 -->
   <header class="topbar">
     <nav class="nav-actions">
       <button class="btn ghost" @click="logout" aria-label="登出">登出</button>
     </nav>
   </header>
 
-  <!-- 全螢幕影片（在導覽列下方鋪滿） -->
-  <div class="chat-video">
-    <video autoplay muted loop playsinline class="bg-video">
-      <source :src="videoSrc" type="video/mp4" />
-      你的瀏覽器不支援影片播放
-    </video>
+  <div class="media-wrap">
+    <img v-if="!showVideo" :src="idleImg" class="face" alt="idle face" />
+    <video
+      v-else
+      ref="videoEl"
+      :src="speakingVideo"
+      class="face"
+      playsinline
+      muted
+      autoplay
+      loop
+    ></video>
+  </div>
+
+  <div class="status-pill" :class="isBusy ? 'busy' : 'idle'">
+    {{ isBusy ? '處理中…' : '可對我說話' }}
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
-import axios from 'axios'
-import videoFile from '@/assets/image/bg.mp4'
+import { useRouter } from 'vue-router'
+import { transcribe, chat } from '@/api'
 
-/* ========= 參數（可依需求微調） ========= */
-const MAX_RECORD_MS   = 7000   // 最長錄音時間（毫秒）
-const SILENCE_DB      = -50    // 靜音門檻（dB，值越小越嚴格）
-const SILENCE_HOLD_MS = 1200   // 連續靜音多久視為結束（毫秒）
-const CHECK_INTERVAL  = 100    // 音量偵測頻率（毫秒）
-const TRANSCRIBE_URL  = '/api/audio/transcribe' // 上傳端點
+// 靜態資源
+import idleImg from '@/assets/image/12.png'
+import speakingVideo from '@/assets/image/bg.mp4'
 
-/* ========= 狀態 ========= */
-const videoSrc = videoFile
-let stream, mediaRecorder, chunks = []
-let stopTimer = null
-let audioCtx, analyser, dataArray, rafId = null
-let silenceAccum = 0
-let startedAt = 0
-
-/* ========= 登出（沿用你的做法） ========= */
-function logout(){
+// 路由 & 登出
+const router = useRouter()
+function logout () {
   localStorage.removeItem('access_token')
-  location.replace('/elder/login') // 或 router.replace('/login')
+  router.replace('/')
 }
 
-/* ========= 音量偵測（Web Audio API） ========= */
-function setupAnalyser(s) {
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)()
-  const source = audioCtx.createMediaStreamSource(s)
-  analyser = audioCtx.createAnalyser()
-  analyser.fftSize = 512
-  dataArray = new Uint8Array(analyser.frequencyBinCount)
-  source.connect(analyser)
+// 狀態：圖片 ↔ 影片
+const showVideo = ref(false)
+const videoEl = ref(null)
+function handleTTSStart () {
+  showVideo.value = true
+  try { videoEl.value?.play?.() } catch {}
 }
-
-/* 將 0~255 頻譜估計為 dB 簡易值（非嚴謹，但足夠判斷靜音） */
-function estimateDb() {
-  analyser.getByteFrequencyData(dataArray)
-  let sum = 0
-  for (let i = 0; i < dataArray.length; i++) sum += dataArray[i] * dataArray[i]
-  const rms = Math.sqrt(sum / dataArray.length) || 0.00001
-  // 映射成近似 dB；常數 255 只是正規化用
-  const db = 20 * Math.log10(rms / 255)
-  return db
-}
-
-function watchSilence() {
-  const loop = () => {
-    const db = estimateDb()
-    // 低於門檻就累加靜音時間，反之歸零
-    if (db < SILENCE_DB) {
-      silenceAccum += CHECK_INTERVAL
-    } else {
-      silenceAccum = 0
-    }
-    const elapsed = performance.now() - startedAt
-    // 連續靜音 or 超時 → 停止錄音
-    if ((silenceAccum >= SILENCE_HOLD_MS && elapsed > 1000) || elapsed >= MAX_RECORD_MS) {
-      safeStop()
-      return
-    }
-    rafId = setTimeout(loop, CHECK_INTERVAL)
+function handleTTSEnd () {
+  showVideo.value = false
+  if (videoEl.value) {
+    try { videoEl.value.pause?.(); videoEl.value.currentTime = 0 } catch {}
   }
-  rafId = setTimeout(loop, CHECK_INTERVAL)
 }
 
-/* ========= 錄音流程 ========= */
-async function startRecording() {
-  // 1) 取得麥克風
+// VAD + 錄音
+let stream, audioCtx, analyser, source, rafId
+let mediaRecorder, chunks = []
+let speaking = false, lastVoiceTs = 0
+const START_THRESHOLD = 0.02
+const STOP_THRESHOLD = 0.01
+const SILENCE_HANG_MS = 700
+const isBusy = ref(false)
+
+async function initMic () {
   stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-  setupAnalyser(stream)
+  audioCtx = new AudioContext()
+  analyser = audioCtx.createAnalyser()
+  analyser.fftSize = 2048
+  source = audioCtx.createMediaStreamSource(stream)
+  source.connect(analyser)
 
-  // 2) 建立 MediaRecorder
-  mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
-  chunks = []
-  silenceAccum = 0
-  startedAt = performance.now()
+  mediaRecorder = new MediaRecorder(stream)
+  mediaRecorder.ondataavailable = e => chunks.push(e.data)
+  mediaRecorder.onstop = onUtteranceEnd
 
-  mediaRecorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data) }
+  loopVAD()
+}
 
-  mediaRecorder.onstop = async () => {
-    try {
-      // 清除計時與監聽
-      if (stopTimer) clearTimeout(stopTimer)
-      if (rafId) clearTimeout(rafId)
+function loopVAD () {
+  const buf = new Uint8Array(analyser.fftSize)
+  analyser.getByteTimeDomainData(buf)
 
-      // 3) 組成音檔並上傳到 /audio/transcribe
-      const blob = new Blob(chunks, { type: 'audio/webm' })
-      const fd = new FormData()
-      fd.append('file', blob, 'speech.webm')
+  let sum = 0
+  for (let i = 0; i < buf.length; i++) {
+    const v = (buf[i] - 128) / 128
+    sum += v * v
+  }
+  const rms = Math.sqrt(sum / buf.length)
 
-      await axios.post(TRANSCRIBE_URL, fd, {
-        headers: { 'Content-Type': 'multipart/form-data' }
-      })
-      // ↑ 成功就代表你的需求「錄音結束 → 自動上傳」已完成
-      // 如需收到文字可用： const text = res.data?.text
-
-      // 若要自動下一輪，可在此再呼叫 startRecording()
-      // setTimeout(() => startRecording(), 600)
-    } catch (err) {
-      console.error('上傳轉寫失敗：', err)
+  const now = performance.now()
+  if (!speaking && rms > START_THRESHOLD) {
+    speaking = true
+    lastVoiceTs = now
+    startRecording()
+  } else if (speaking) {
+    if (rms > STOP_THRESHOLD) {
+      lastVoiceTs = now
+    } else if (now - lastVoiceTs > SILENCE_HANG_MS) {
+      speaking = false
+      stopRecording()
     }
   }
-
-  mediaRecorder.start()
-  // 4) 啟動靜音監測與最長時間保險
-  watchSilence()
-  stopTimer = setTimeout(safeStop, MAX_RECORD_MS + 200)
+  rafId = requestAnimationFrame(loopVAD)
 }
 
-function safeStop() {
-  try {
-    if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop()
-  } catch (_) {}
+function startRecording () {
+  chunks = []
+  mediaRecorder?.start()
+}
+function stopRecording () {
+  if (mediaRecorder?.state === 'recording') mediaRecorder.stop()
 }
 
-/* ========= 生命週期 ========= */
-onMounted(async () => {
+// 完成一句話 → STT → Chat → TTS
+async function onUtteranceEnd () {
+  const blob = new Blob(chunks, { type: 'audio/webm' })
+  chunks = []
+  if (!blob.size) return
+
   try {
-    await startRecording()  // 進頁就請求麥克風並開始錄音
+    isBusy.value = true
+
+    // STT
+    const { data: sttData } = await transcribe(blob)
+    const userText = sttData?.text || ''
+    console.log('[STT]', userText)
+    if (!userText) return
+
+    // Chat（直接取得回覆和語音 base64）
+    const token = localStorage.getItem('access_token')
+    console.log('[Token]', token) // 新增這行
+    const { data: chatData } = await chat(userText, {
+      headers: { Authorization: `Bearer ${token}` }
+    })
+    const replyText = chatData?.reply || chatData?.text || ''
+    const audioBase64 = chatData?.audio_base64
+    console.log('[Chat reply]', replyText)
+    console.log('[Chat audio_base64]', audioBase64?.slice(0, 40)) // 顯示前40字元
+    let audioUrl = ''
+    if (audioBase64) {
+      const mime = 'audio/mp3'
+      const bin = atob(audioBase64)
+      const bytes = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+      const blobUrl = new Blob([bytes], { type: mime })
+      audioUrl = URL.createObjectURL(blobUrl)
+      console.log('[Audio URL]', audioUrl)
+    }
+
+    if (audioUrl) {
+      await playTTS(audioUrl)
+      console.log('[TTS] 播放完成')
+    } else {
+      console.warn('[TTS] 沒有語音資料')
+    }
   } catch (e) {
-    console.error('麥克風權限失敗：', e)
+    console.error('[voice-flow error]', e)
+    handleTTSEnd()
+  } finally {
+    isBusy.value = false
   }
-})
+}
 
+function playTTS (url) {
+  return new Promise((resolve) => {
+    const audio = new Audio(url)
+    audio.addEventListener('play', () => handleTTSStart(), { once: true })
+    audio.addEventListener('ended', () => { handleTTSEnd(); resolve() }, { once: true })
+    audio.addEventListener('error', () => { handleTTSEnd(); resolve() }, { once: true })
+    audio.play().catch(() => { handleTTSEnd(); resolve() })
+  })
+}
+
+// 生命週期
+onMounted(() => { initMic().catch(console.error) })
 onBeforeUnmount(() => {
-  safeStop()
-  if (stopTimer) clearTimeout(stopTimer)
-  if (rafId) clearTimeout(rafId)
-  if (audioCtx) audioCtx.close().catch(()=>{})
-  if (stream) stream.getTracks().forEach(t => t.stop())
+  if (rafId) cancelAnimationFrame(rafId)
+  mediaRecorder?.stop()
+  source?.disconnect()
+  analyser?.disconnect()
+  stream?.getTracks()?.forEach(t => t.stop())
 })
 </script>
 
 <style scoped>
-/* 關掉全域雙欄/置中（避免影片被擠到上方或左側） */
-:global(body),
-:global(#app){
-  display: block !important;
-  padding: 0 !important;
-  margin: 0 !important;
-}
-
-/* 置頂導覽列 */
-.topbar{
-  position: fixed;
-  top: 0; left: 0; right: 0;
-  height: 64px;
-  z-index: 1000;
-  display:flex; align-items:center; justify-content: flex-end;
+.topbar {
+  position: fixed; top: 0; left: 0; right: 0;
+  height: 64px; z-index: 100;
+  display: flex; justify-content: flex-end; align-items: center;
   padding: 0 16px;
-  background: rgba(255,255,255,.82);
+  background: rgba(255, 255, 255, 0.82);
   border-bottom: 1px solid #363636;
-  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
 }
-.btn.ghost{
-  background: transparent;
-  border: 1px solid #334155;
-  color: #1d418a;
-  padding: 10px 14px;
-  border-radius: 12px;
-  font-weight: 700;
-  cursor: pointer;
+.btn.ghost {
+  background: transparent; border: 1px solid #334155;
+  color: #1d418a; padding: 10px 14px;
+  border-radius: 12px; font-weight: 700; cursor: pointer;
 }
-
-/* 影片容器：鋪滿 header 下方整個視窗 */
-.chat-video{
-  position: fixed;
-  top: 64px; left: 0; right: 0; bottom: 0;  /* 扣掉導覽列 */
-  overflow: hidden;
-  background: #000;
-  z-index: 0;
+.media-wrap {
+  position: fixed; inset: 64px 0 0 0;
+  background: #000; display: grid; place-items: center;
 }
-.bg-video{
-  display:block;       /* 移除 inline 底部空隙 */
-  width: 100%;
-  height: 100%;
-  object-fit: cover;   /* 滿版裁切 */
-  object-position: center;
+.face {
+  width: 100%; height: 100%;
+  object-fit: contain;
+  user-select: none; pointer-events: none;
 }
+.status-pill {
+  position: fixed; left: 12px; bottom: 12px;
+  padding: 8px 12px; border-radius: 999px;
+  font-weight: 700; color: #fff; z-index: 200;
+}
+.status-pill.idle { background:#16a34a; }
+.status-pill.busy { background:#2563eb; }
 </style>
+

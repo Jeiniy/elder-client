@@ -1,15 +1,13 @@
+// src/router/index.js
 import { createRouter, createWebHistory } from 'vue-router'
-import LoginView from '@/views/LoginView.vue'
-import HomeView from '@/views/HomeView.vue'
-import ChatView from '@/views/ChatView.vue'
+
+// 選「其一」寫法，不要同檔同時用靜態 + 動態
 const router = createRouter({
-  history: createWebHistory('/elder/'),
+  history: createWebHistory(import.meta.env.BASE_URL), // ← 重點
   routes: [
-    { path: '/', component: LoginView },
-    { path: '/chat', component: ChatView },
-    { path: '/home', component: HomeView},
-    // 之後如果要有登入後的首頁，可以另外開一個路由
-    // 例如：{ path: '/dashboard', component: DashboardView }
+    { path: '/',     name: 'login', component: () => import('@/views/LoginView.vue') },
+    { path: '/home', name: 'home',  component: () => import('@/views/HomeView.vue') },
+    { path: '/chat', name: 'chat',  component: () => import('@/views/ChatView.vue') },
   ],
 })
 

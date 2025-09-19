@@ -1,23 +1,18 @@
 // vite.config.js
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
-import { fileURLToPath, URL } from 'node:url'   // ← 一定要有，否則會報 fileURLToPath 未定義
+import { fileURLToPath, URL } from 'node:url'
 
-export default defineConfig(({ mode }) => ({
+const base = process.env.NODE_ENV === 'production' ? '/elder/' : '/'
+
+export default defineConfig({
   plugins: [vue()],
-  // 部署在 /elder/ 子路徑（開發也用同一個 base，網址用 http://<IP>:5173/elder/）
-  base: '/elder/',
+  base,
+  server: { host: true },
+  build: { outDir: 'dist' },
   resolve: {
     alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url)), // ← 讓 @ 指到 src
+      '@': fileURLToPath(new URL('./src', import.meta.url)), // ← 這行一定要有
     },
   },
-  server: {
-    host: true,
-    proxy: {
-      '/video_feed': { target: 'http://100.122.39.78:5000', changeOrigin: true },
-      '/events': { target: 'http://100.122.39.78:5000', changeOrigin: true },
-      '/fall_status': { target: 'http://100.122.39.78:5000', changeOrigin: true },
-    },
-  },
-}))
+})

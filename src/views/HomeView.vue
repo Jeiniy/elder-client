@@ -7,14 +7,14 @@ function goInteract () {
 }
 function logout () {
   localStorage.removeItem('access_token')
-  router.replace('/login')
+  router.replace('/')
 }
 </script>
 
 <template>
   <!-- 置頂導覽列 -->
    <header class="topbar">
-    <div class="brand"> 長者端</div>
+    
     <nav class="nav-actions">
       <button class="btn ghost" @click="logout" aria-label="登出">登出</button>
     </nav>
@@ -39,18 +39,17 @@ function logout () {
   position: fixed;
   top: 0; left: 0; right: 0;
   height: 64px;
-  z-index: 100;
-  display:flex; align-items:center; justify-content:space-between;
+  z-index: 1000;
+  display:flex; align-items:center; justify-content: flex-end;
   padding: 0 16px;
-  background: rgba(17,24,39,.82);
-  border-bottom: 1px solid #1f2937;
+  background: rgba(255, 255, 255, 0.82);
+  border-bottom: 1px solid #363636;
   backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
-  color:#e5e7eb;
 }
 .btn.ghost{
   background: transparent;
-  border: 1px solid #334155;
-  color: #e5e7eb;
+  border: 1px solid #3a3a3a;
+  color: #626262;
   padding: 10px 14px;
   border-radius: 12px;
   font-weight: 700;
@@ -60,17 +59,18 @@ function logout () {
 
 /* :root{ --headerH: 64px; } */
 
-
 .home-shell{
-  margin-top: calc(var(--headerH) + env(safe-area-inset-top, 0px)) !important;
+
   display: grid !important;
-  place-items: center !important;
-  width: 100% !important;
-  max-width: none !important;
-  padding: 24px 16px env(safe-area-inset-bottom, 0px);
+ 
+  
+  align-items: center;   /* 垂直置中 */
+  justify-content: center;
+  padding: % 16px env(safe-area-inset-bottom, 0px);
   box-sizing: border-box;
-  margin-left: 140px;
+  
 }
+
 
 
 .card{
@@ -80,7 +80,8 @@ function logout () {
   border:0px solid #1f2937; border-radius:28px;
   box-shadow: 0 24px 60px rgba(0,0,0,.25);
   padding: clamp(24px, 4vw, 40px);
-  width: min(800px, 92vw);
+  top: -30%;
+  width: 100%;
   height: 350px;
 }
 
